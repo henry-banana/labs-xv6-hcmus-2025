@@ -374,8 +374,9 @@ typedef uint64 *pagetable_t; // 512 PTEs
 #define PTE_W (1L << 2)
 #define PTE_X (1L << 3)
 #define PTE_U (1L << 4) // user can access
-
-
+// Hiep 
+#define PTE_A (1L << 6) // accessed - hardware sets this
+#define PTE_D (1L << 7) // dirty
 
 #if defined(LAB_MMAP) || defined(LAB_PGTBL) || defined(LAB_COW)
 #define PTE_LEAF(pte) (((pte) & PTE_R) | ((pte) & PTE_W) | ((pte) & PTE_X))
