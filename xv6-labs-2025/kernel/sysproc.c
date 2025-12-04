@@ -16,7 +16,7 @@ sys_exit(void)
   int n;
   argint(0, &n);
   kexit(n);
-  return 0;  // not reached
+  return 0; // not reached
 }
 
 uint64
@@ -50,15 +50,19 @@ sys_sbrk(void)
   argint(1, &t);
   addr = myproc()->sz;
 
-  if(t == SBRK_EAGER || n < 0) {
-    if(growproc(n) < 0) {
+  if (t == SBRK_EAGER || n < 0)
+  {
+    if (growproc(n) < 0)
+    {
       return -1;
     }
-  } else {
+  }
+  else
+  {
     // Lazily allocate memory for this process: increase its memory
     // size but don't allocate memory. If the processes uses the
     // memory, vmfault() will allocate it.
-    if(addr + n < addr)
+    if (addr + n < addr)
       return -1;
     myproc()->sz += n;
   }
@@ -71,14 +75,15 @@ sys_pause(void)
   int n;
   uint ticks0;
 
-
   argint(0, &n);
-  if(n < 0)
+  if (n < 0)
     n = 0;
   acquire(&tickslock);
   ticks0 = ticks;
-  while(ticks - ticks0 < n){
-    if(killed(myproc())){
+  while (ticks - ticks0 < n)
+  {
+    if (killed(myproc()))
+    {
       release(&tickslock);
       return -1;
     }
@@ -88,36 +93,33 @@ sys_pause(void)
   return 0;
 }
 
-
 #ifdef LAB_PGTBL
-int
-sys_pgpte(void)
+int sys_pgpte(void)
 {
   uint64 va;
-  struct proc *p;  
+  struct proc *p;
 
   p = myproc();
   argaddr(0, &va);
   pte_t *pte = pgpte(p->pagetable, va);
-  if(pte != 0) {
-      return (uint64) *pte;
+  if (pte != 0)
+  {
+    return (uint64)*pte;
   }
   return 0;
 }
 #endif
 
 #ifdef LAB_PGTBL
-int
-sys_kpgtbl(void)
+int sys_kpgtbl(void)
 {
-  struct proc *p;  
+  struct proc *p;
 
   p = myproc();
   vmprint(p->pagetable);
   return 0;
 }
 #endif
-
 
 uint64
 sys_kill(void)
@@ -139,4 +141,41 @@ sys_uptime(void)
   xticks = ticks;
   release(&tickslock);
   return xticks;
+}
+
+extern pte_t *walk(pagetable_t, uint64, int);
+int sys_pgaccess(void)
+{
+  uint64 base;      // Địa chỉ bắt đầu
+  int len;          // Số trang cần check
+  uint64 mask_addr; // Địa chỉ buffer để lưu kết quả
+
+  // Parse arguments
+  argaddr(0, &base);
+  argint(1, &len);
+  argaddr(2, &mask_addr);
+  // Giới hạn số trang (tránh scan quá nhiều)
+
+  if (len > 64)
+    len = 64;
+  struct proc *p = myproc();
+  uint64 mask = 0;
+  for (int i = 0; i < len; i++)
+  {
+    uint64 va = base + i * PGSIZE;
+    // Tìm PTE
+    pte_t *pte = walk(p->pagetable, va, 0);
+    if (pte == 0)
+      continue;
+    // Kiểm tra PTE_A
+    if (*pte & PTE_A)
+    {
+      mask |= (1L << i); // Set bit i trong mask
+      *pte &= ~PTE_A;    // QUAN TRỌNG: Clear PTE_A
+    }
+  }
+  // Copy kết quả về userspace
+  if (copyout(p->pagetable, mask_addr, (char *)&mask, sizeof(mask)) < 0)
+    return -1;
+  return 0;
 }
