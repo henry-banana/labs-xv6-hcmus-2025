@@ -1,0 +1,740 @@
+diff --git a/kernel/defs.h b/kernel/defs.h
+index 42d5317..3aa265b 100644
+--- a/kernel/defs.h
++++ b/kernel/defs.h
+@@ -203,6 +203,10 @@ void            virtio_disk_init(void);
+ void            virtio_disk_rw(struct buf *, int);
+ void            virtio_disk_intr(void);
+ 
++// ================ NPHOANG ================
++void            vmprint(pagetable_t);
++// ================ NPHOANG ================
++
+ // number of elements in fixed-size array
+ #define NELEM(x) (sizeof(x)/sizeof((x)[0]))
+ 
+diff --git a/kernel/exec.c b/kernel/exec.c
+index 08bfbe8..57713aa 100644
+--- a/kernel/exec.c
++++ b/kernel/exec.c
+@@ -135,6 +135,13 @@ kexec(char *path, char **argv)
+   p->trapframe->sp = sp; // initial stack pointer
+   proc_freepagetable(oldpagetable, oldsz);
+ 
++  // ================ NPHOANG ================
++  // IN BẢNG TRANG CỦA TIẾN TRÌNH ĐẦU TIÊN (chỉ cho init process)
++  if(p->pid == 1) {  // Chỉ in cho tiến trình init (PID = 1)
++    vmprint(p->pagetable);
++  }
++  // ================ NPHOANG ================
++
+   return argc; // this ends up in a0, the first argument to main(argc, argv)
+ 
+  bad:
+diff --git a/kernel/riscv.h b/kernel/riscv.h
+index 257c54f..4a3d0e3 100644
+--- a/kernel/riscv.h
++++ b/kernel/riscv.h
+@@ -374,8 +374,9 @@ typedef uint64 *pagetable_t; // 512 PTEs
+ #define PTE_W (1L << 2)
+ #define PTE_X (1L << 3)
+ #define PTE_U (1L << 4) // user can access
+-
+-
++// Hiep 
++#define PTE_A (1L << 6) // accessed - hardware sets this
++#define PTE_D (1L << 7) // dirty
+ 
+ #if defined(LAB_MMAP) || defined(LAB_PGTBL) || defined(LAB_COW)
+ #define PTE_LEAF(pte) (((pte) & PTE_R) | ((pte) & PTE_W) | ((pte) & PTE_X))
+diff --git a/kernel/syscall.c b/kernel/syscall.c
+index 5a368e7..bab7e38 100644
+--- a/kernel/syscall.c
++++ b/kernel/syscall.c
+@@ -11,24 +11,22 @@
+ #include "file.h"
+ 
+ // Fetch the uint64 at addr from the current process.
+-int
+-fetchaddr(uint64 addr, uint64 *ip)
++int fetchaddr(uint64 addr, uint64 *ip)
+ {
+   struct proc *p = myproc();
+-  if(addr >= p->sz || addr+sizeof(uint64) > p->sz) // both tests needed, in case of overflow
++  if (addr >= p->sz || addr + sizeof(uint64) > p->sz) // both tests needed, in case of overflow
+     return -1;
+-  if(copyin(p->pagetable, (char *)ip, addr, sizeof(*ip)) != 0)
++  if (copyin(p->pagetable, (char *)ip, addr, sizeof(*ip)) != 0)
+     return -1;
+   return 0;
+ }
+ 
+ // Fetch the nul-terminated string at addr from the current process.
+ // Returns length of string, not including nul, or -1 for error.
+-int
+-fetchstr(uint64 addr, char *buf, int max)
++int fetchstr(uint64 addr, char *buf, int max)
+ {
+   struct proc *p = myproc();
+-  if(copyinstr(p->pagetable, buf, addr, max) < 0)
++  if (copyinstr(p->pagetable, buf, addr, max) < 0)
+     return -1;
+   return strlen(buf);
+ }
+@@ -37,7 +35,8 @@ static uint64
+ argraw(int n)
+ {
+   struct proc *p = myproc();
+-  switch (n) {
++  switch (n)
++  {
+   case 0:
+     return p->trapframe->a0;
+   case 1:
+@@ -56,8 +55,7 @@ argraw(int n)
+ }
+ 
+ // Fetch the nth 32-bit system call argument.
+-void
+-argint(int n, int *ip)
++void argint(int n, int *ip)
+ {
+   *ip = argraw(n);
+ }
+@@ -65,8 +63,7 @@ argint(int n, int *ip)
+ // Retrieve an argument as a pointer.
+ // Doesn't check for legality, since
+ // copyin/copyout will do that.
+-void
+-argaddr(int n, uint64 *ip)
++void argaddr(int n, uint64 *ip)
+ {
+   *ip = argraw(n);
+ }
+@@ -74,8 +71,7 @@ argaddr(int n, uint64 *ip)
+ // Fetch the nth word-sized system call argument as a null-terminated string.
+ // Copies into buf, at most max.
+ // Returns string length if OK (including nul), -1 if error.
+-int
+-argstr(int n, char *buf, int max)
++int argstr(int n, char *buf, int max)
+ {
+   uint64 addr;
+   argaddr(n, &addr);
+@@ -104,6 +100,7 @@ extern uint64 sys_unlink(void);
+ extern uint64 sys_link(void);
+ extern uint64 sys_mkdir(void);
+ extern uint64 sys_close(void);
++extern uint64 sys_pgaccess(void);
+ 
+ #ifdef LAB_NET
+ extern uint64 sys_bind(void);
+@@ -119,54 +116,57 @@ extern uint64 sys_kpgtbl(void);
+ // An array mapping syscall numbers from syscall.h
+ // to the function that handles the system call.
+ static uint64 (*syscalls[])(void) = {
+-[SYS_fork]    sys_fork,
+-[SYS_exit]    sys_exit,
+-[SYS_wait]    sys_wait,
+-[SYS_pipe]    sys_pipe,
+-[SYS_read]    sys_read,
+-[SYS_kill]    sys_kill,
+-[SYS_exec]    sys_exec,
+-[SYS_fstat]   sys_fstat,
+-[SYS_chdir]   sys_chdir,
+-[SYS_dup]     sys_dup,
+-[SYS_getpid]  sys_getpid,
+-[SYS_sbrk]    sys_sbrk,
+-[SYS_pause]   sys_pause,
+-[SYS_uptime]  sys_uptime,
+-[SYS_open]    sys_open,
+-[SYS_write]   sys_write,
+-[SYS_mknod]   sys_mknod,
+-[SYS_unlink]  sys_unlink,
+-[SYS_link]    sys_link,
+-[SYS_mkdir]   sys_mkdir,
+-[SYS_close]   sys_close,
++    [SYS_fork] sys_fork,
++    [SYS_exit] sys_exit,
++    [SYS_wait] sys_wait,
++    [SYS_pipe] sys_pipe,
++    [SYS_read] sys_read,
++    [SYS_kill] sys_kill,
++    [SYS_exec] sys_exec,
++    [SYS_fstat] sys_fstat,
++    [SYS_chdir] sys_chdir,
++    [SYS_dup] sys_dup,
++    [SYS_getpid] sys_getpid,
++    [SYS_sbrk] sys_sbrk,
++    [SYS_pause] sys_pause,
++    [SYS_uptime] sys_uptime,
++    [SYS_open] sys_open,
++    [SYS_write] sys_write,
++    [SYS_mknod] sys_mknod,
++    [SYS_unlink] sys_unlink,
++    [SYS_link] sys_link,
++    [SYS_mkdir] sys_mkdir,
++    [SYS_close] sys_close,
++    [SYS_pgaccess] sys_pgaccess,
++
+ #ifdef LAB_NET
+-[SYS_bind] sys_bind,
+-[SYS_unbind] sys_unbind,
+-[SYS_send] sys_send,
+-[SYS_recv] sys_recv,
++    [SYS_bind] sys_bind,
++    [SYS_unbind] sys_unbind,
++    [SYS_send] sys_send,
++    [SYS_recv] sys_recv,
+ #endif
+ #ifdef LAB_PGTBL
+-[SYS_pgpte] sys_pgpte,
+-[SYS_kpgtbl] sys_kpgtbl,
++    [SYS_pgpte] sys_pgpte,
++    [SYS_kpgtbl] sys_kpgtbl,
+ #endif
+ };
+ 
+-
+-void
+-syscall(void)
++void syscall(void)
+ {
+   int num;
+   struct proc *p = myproc();
+ 
+   num = p->trapframe->a7;
+-  if(num > 0 && num < NELEM(syscalls) && syscalls[num]) {
++  if (num > 0 && num < NELEM(syscalls) && syscalls[num])
++  {
+     // Use num to lookup the system call function for num, call it,
+     // and store its return value in p->trapframe->a0
+     p->trapframe->a0 = syscalls[num]();
+-  } else {
++  }
++  else
++  {
+     printf("%d %s: unknown sys call %d\n",
+-            p->pid, p->name, num);
++           p->pid, p->name, num);
+     p->trapframe->a0 = -1;
+   }
+ }
+diff --git a/kernel/syscall.h b/kernel/syscall.h
+index 1b28fe8..8ed50eb 100644
+--- a/kernel/syscall.h
++++ b/kernel/syscall.h
+@@ -35,3 +35,4 @@
+ #define SYS_recv      32
+ #define SYS_pgpte     33
+ #define SYS_kpgtbl    34
++#define SYS_pgaccess  35
+diff --git a/kernel/sysproc.c b/kernel/sysproc.c
+index 7daf269..064f2aa 100644
+--- a/kernel/sysproc.c
++++ b/kernel/sysproc.c
+@@ -16,7 +16,7 @@ sys_exit(void)
+   int n;
+   argint(0, &n);
+   kexit(n);
+-  return 0;  // not reached
++  return 0; // not reached
+ }
+ 
+ uint64
+@@ -50,15 +50,19 @@ sys_sbrk(void)
+   argint(1, &t);
+   addr = myproc()->sz;
+ 
+-  if(t == SBRK_EAGER || n < 0) {
+-    if(growproc(n) < 0) {
++  if (t == SBRK_EAGER || n < 0)
++  {
++    if (growproc(n) < 0)
++    {
+       return -1;
+     }
+-  } else {
++  }
++  else
++  {
+     // Lazily allocate memory for this process: increase its memory
+     // size but don't allocate memory. If the processes uses the
+     // memory, vmfault() will allocate it.
+-    if(addr + n < addr)
++    if (addr + n < addr)
+       return -1;
+     myproc()->sz += n;
+   }
+@@ -71,14 +75,15 @@ sys_pause(void)
+   int n;
+   uint ticks0;
+ 
+-
+   argint(0, &n);
+-  if(n < 0)
++  if (n < 0)
+     n = 0;
+   acquire(&tickslock);
+   ticks0 = ticks;
+-  while(ticks - ticks0 < n){
+-    if(killed(myproc())){
++  while (ticks - ticks0 < n)
++  {
++    if (killed(myproc()))
++    {
+       release(&tickslock);
+       return -1;
+     }
+@@ -88,29 +93,27 @@ sys_pause(void)
+   return 0;
+ }
+ 
+-
+ #ifdef LAB_PGTBL
+-int
+-sys_pgpte(void)
++int sys_pgpte(void)
+ {
+   uint64 va;
+-  struct proc *p;  
++  struct proc *p;
+ 
+   p = myproc();
+   argaddr(0, &va);
+   pte_t *pte = pgpte(p->pagetable, va);
+-  if(pte != 0) {
+-      return (uint64) *pte;
++  if (pte != 0)
++  {
++    return (uint64)*pte;
+   }
+   return 0;
+ }
+ #endif
+ 
+ #ifdef LAB_PGTBL
+-int
+-sys_kpgtbl(void)
++int sys_kpgtbl(void)
+ {
+-  struct proc *p;  
++  struct proc *p;
+ 
+   p = myproc();
+   vmprint(p->pagetable);
+@@ -118,7 +121,6 @@ sys_kpgtbl(void)
+ }
+ #endif
+ 
+-
+ uint64
+ sys_kill(void)
+ {
+@@ -140,3 +142,40 @@ sys_uptime(void)
+   release(&tickslock);
+   return xticks;
+ }
++
++extern pte_t *walk(pagetable_t, uint64, int);
++int sys_pgaccess(void)
++{
++  uint64 base;      // Địa chỉ bắt đầu
++  int len;          // Số trang cần check
++  uint64 mask_addr; // Địa chỉ buffer để lưu kết quả
++
++  // Parse arguments
++  argaddr(0, &base);
++  argint(1, &len);
++  argaddr(2, &mask_addr);
++  // Giới hạn số trang (tránh scan quá nhiều)
++
++  if (len > 64)
++    len = 64;
++  struct proc *p = myproc();
++  uint64 mask = 0;
++  for (int i = 0; i < len; i++)
++  {
++    uint64 va = base + i * PGSIZE;
++    // Tìm PTE
++    pte_t *pte = walk(p->pagetable, va, 0);
++    if (pte == 0)
++      continue;
++    // Kiểm tra PTE_A
++    if (*pte & PTE_A)
++    {
++      mask |= (1L << i); // Set bit i trong mask
++      *pte &= ~PTE_A;    // QUAN TRỌNG: Clear PTE_A
++    }
++  }
++  // Copy kết quả về userspace
++  if (copyout(p->pagetable, mask_addr, (char *)&mask, sizeof(mask)) < 0)
++    return -1;
++  return 0;
++}
+diff --git a/kernel/vm.c b/kernel/vm.c
+index fb871ed..ea27360 100644
+--- a/kernel/vm.c
++++ b/kernel/vm.c
+@@ -140,15 +140,48 @@ walkaddr(pagetable_t pagetable, uint64 va)
+   return pa;
+ }
+ 
+-
++// ================ NPHOANG ================
+ #if defined(LAB_PGTBL) || defined(SOL_MMAP) || defined(SOL_COW)
++// Helper function to recursively print page table entries
+ void
+-vmprint(pagetable_t pagetable) {
+-  // your code here
+-}
+-#endif
++vmprint_helper(pagetable_t pagetable, int level)
++{
++  // Duyệt qua tất cả 512 PTEs trong page table hiện tại
++  for(int i = 0; i < 512; ++i) {
++    pte_t pte = pagetable[i];
+ 
++    // Chỉ in các PTE hợp lệ (có bit PTE_V = 1)
++    if(pte & PTE_V) {
++      // In thụt đầu dòng theo level (mỗi level thêm " ..")
++      for(int j = 0; j <= level; ++j) {
++        printf(" ..");
++      }
+ 
++      // In index, giá trị PTE, và địa chỉ vật lý
++      printf("%d: pte %p pa %p\n",
++             i,                     // Index của PTE trong page table
++             (void*)pte,            // Giá trị đầy đủ của PTE (64-bit)
++             (void*)PTE2PA(pte));   // Địa chỉ vật lý được trích xuất từ PTE
++
++      // Nếu đây KHÔNG phải là leaf page (kiểm tra bằng cờ R|W|X)
++      // thì đệ quy xuống level tiếp theo
++      if((pte & (PTE_R|PTE_W|PTE_X)) == 0 && level < 2) {
++        // PTE này trỏ đến một page table ở level thấp hơn
++        uint64 child_pa = PTE2PA(pte);
++        vmprint_helper((pagetable_t)child_pa, level + 1);
++      }
++    }
++  }
++}
++
++void
++vmprint(pagetable_t pagetable)
++{
++  printf("page table %p\n", pagetable);
++  vmprint_helper(pagetable, 0);
++}
++#endif
++// ================ NPHOANG ================
+ 
+ // add a mapping to the kernel page table.
+ // only used when booting.
+diff --git a/user/pgtbltest.c b/user/pgtbltest.c
+index 230501c..b6161d8 100644
+--- a/user/pgtbltest.c
++++ b/user/pgtbltest.c
+@@ -12,19 +12,22 @@ void print_kpgtbl();
+ void ugetpid_test();
+ void superpg_fork();
+ void superpg_free();
++void pgaccess_test();  // NEW: pgaccess test suite
+ 
+ int
+ main(int argc, char *argv[])
+ {
+   print_pgtbl();
+-  ugetpid_test();
+-  print_kpgtbl();
+-  superpg_fork();
+-  superpg_free();
++  // ugetpid_test();  // SKIP: USYSCALL page (không thuộc Lab 2)
++  print_kpgtbl();     // Test vmprint
++  pgaccess_test();    // Test pgaccess
++  // superpg_fork();  // SKIP: Super pages (không thuộc Lab 2)
++  // superpg_free();  // SKIP: Super pages (không thuộc Lab 2)
+   printf("pgtbltest: all tests succeeded\n");
+   exit(0);
+ }
+ 
++
+ char *testname = "???";
+ 
+ void
+@@ -89,10 +92,255 @@ print_kpgtbl()
+   printf("print_kpgtbl: OK\n");
+ }
+ 
++/**
++ * TEST 1: pgaccess_test_none
++ * --------------------------
++ * Mục đích: Kiểm tra syscall pgaccess() hoạt động cơ bản
++ * 
++ * Input:  3 pages mới allocate, KHÔNG access
++ * Output: abits có thể là 0 hoặc giá trị khác (tùy cài đặt sbrk)
++ * 
++ * Điều kiện PASS: syscall không return error
++ */
++void
++pgaccess_test_none()
++{
++  char *buf;
++  uint64 abits = 0;
++  
++  printf("pgaccess_test: Test 1 - Kiem tra syscall co hoat dong\n");
++  testname = "pgaccess_none";
++  
++  // Bước 1: Allocate 3 pages
++  buf = sbrk(3 * PGSIZE);
++  if (buf == (char*)0xffffffffffffffff) {
++    err("sbrk failed");
++  }
++  
++  // Bước 2: Clear access bits bằng cách gọi pgaccess lần đầu
++  if (pgaccess(buf, 3, &abits) < 0) {
++    err("pgaccess syscall failed");
++  }
++  
++  // Bước 3: Allocate thêm 3 pages mới và test ngay (không access)
++  char *buf2 = sbrk(3 * PGSIZE);
++  if (buf2 == (char*)0xffffffffffffffff) {
++    err("sbrk buf2 failed");
++  }
++  
++  // Bước 4: Gọi pgaccess trên pages mới
++  abits = 0;
++  if (pgaccess(buf2, 3, &abits) < 0) {
++    err("pgaccess failed on new pages");
++  }
++  
++  // Kết quả: In abits để verify
++  // Lưu ý: sbrk có thể touch pages nên abits có thể != 0
++  printf("  -> Syscall hoat dong, abits = 0x%lx\n", abits);
++  printf("pgaccess_test: Test 1 - OK\n");
++  
++  // Cleanup: Trả lại memory
++  sbrk(-6 * PGSIZE);
++}
++
++/**
++ * TEST 2: pgaccess_test_single
++ * ----------------------------
++ * Mục đích: Kiểm tra pgaccess detect đúng page được access
++ * 
++ * Input:  5 pages, access CHỈ page index 2 (zero-indexed)
++ * Output dự kiến: abits bit 2 = 1, tức là abits & 0x4 != 0
++ * 
++ * Điều kiện PASS: bit 2 trong abits được set
++ * 
++ * Giải thích:
++ *   - Khi ghi vào buf[2*PGSIZE], CPU access page 2
++ *   - Hardware tự động set PTE_A bit trong PTE của page 2
++ *   - pgaccess() đọc PTE và thấy bit PTE_A = 1
++ *   - -> mask bit 2 = 1
++ */
++void
++pgaccess_test_single()
++{
++  char *buf;
++  uint64 abits = 0;
++  
++  printf("pgaccess_test: Test 2 - Detect mot page duoc access\n");
++  testname = "pgaccess_single";
++  
++  // Bước 1: Allocate 5 pages liên tục
++  buf = sbrk(5 * PGSIZE);
++  if (buf == (char*)0xffffffffffffffff) {
++    err("sbrk failed");
++  }
++  
++  // Bước 2: Clear access bits (gọi pgaccess để reset PTE_A)
++  if (pgaccess(buf, 5, &abits) < 0) {
++    err("pgaccess clear failed");
++  }
++  
++  // Bước 3: ACCESS PAGE 2 - Ghi 1 byte vào page 2
++  //         Địa chỉ = buf + 2 * 4096 = byte đầu tiên của page 2
++  buf[2 * PGSIZE] = 'X';
++  
++  // Bước 4: Gọi pgaccess để kiểm tra
++  abits = 0;
++  if (pgaccess(buf, 5, &abits) < 0) {
++    err("pgaccess failed");
++  }
++  
++  // Bước 5: Verify kết quả
++  // Mong đợi: bit 2 được set -> abits = 0b00100 = 0x4 (hoặc có thêm bits khác)
++  printf("  -> abits = 0x%lx (mong doi bit 2 = 1)\n", abits);
++  
++  if ((abits & (1 << 2)) == 0) {
++    printf("  LOI: Bit 2 KHONG duoc set!\n");
++    err("Page 2 accessed but bit not set");
++  }
++  
++  printf("  -> Bit 2 da duoc set dung!\n");
++  printf("pgaccess_test: Test 2 - OK\n");
++  
++  // Cleanup
++  sbrk(-5 * PGSIZE);
++}
++
++/**
++ * TEST 3: pgaccess_test_clearing (QUAN TRỌNG NHẤT!)
++ * --------------------------------------------------
++ * Mục đích: Kiểm tra kernel CLEAR bit PTE_A sau khi đọc
++ * 
++ * Đây là test QUAN TRỌNG NHẤT vì:
++ *   - Nếu không clear PTE_A, lần gọi tiếp sẽ thấy bit = 1 mãi
++ *   - Không thể detect access MỚI trong tương lai
++ * 
++ * Quy trình test:
++ *   Lần 1: Access page 1 -> pgaccess() -> bit 1 = 1 (PASS nếu đúng)
++ *   Lần 2: KHÔNG access  -> pgaccess() -> tất cả bits = 0 (PASS nếu = 0)
++ *   Lần 3: Access page 2 -> pgaccess() -> bit 2 = 1 (PASS nếu đúng)
++ * 
++ * Điều kiện PASS:
++ *   - Lần 1: abits & 0x2 != 0 (bit 1 set)
++ *   - Lần 2: abits == 0       (đã clear!)
++ *   - Lần 3: abits & 0x4 != 0 (bit 2 set)
++ */
++void
++pgaccess_test_clearing()
++{
++  char *buf;
++  uint64 abits = 0;
++  
++  printf("pgaccess_test: Test 3 - Kiem tra clear PTE_A (QUAN TRONG!)\n");
++  testname = "pgaccess_clearing";
++  
++  // ========== SETUP ==========
++  // Allocate 3 pages
++  buf = sbrk(3 * PGSIZE);
++  if (buf == (char*)0xffffffffffffffff) {
++    err("sbrk failed");
++  }
++  
++  // Clear existing bits
++  pgaccess(buf, 3, &abits);
++  printf("  Setup: Da clear access bits\n");
++  
++  // ========== LAN 1: ACCESS PAGE 1 ==========
++  printf("  Lan 1: Access page 1...\n");
++  
++  // Ghi vào page 1 -> hardware set PTE_A = 1
++  buf[1 * PGSIZE] = 'X';
++  
++  // Gọi pgaccess
++  abits = 0;
++  if (pgaccess(buf, 3, &abits) < 0) {
++    err("pgaccess lan 1 failed");
++  }
++  
++  printf("    -> abits = 0x%lx\n", abits);
++  
++  // Verify: bit 1 phải được set
++  if ((abits & (1 << 1)) == 0) {
++    printf("    LOI: Mong doi bit 1 = 1, nhung abits = 0x%lx\n", abits);
++    err("Lan 1 failed: bit 1 not set");
++  }
++  printf("    -> PASS: Bit 1 da set\n");
++  
++  // ========== LAN 2: KHONG ACCESS, KIEM TRA CLEAR ==========
++  printf("  Lan 2: Khong access, kiem tra clear...\n");
++  
++  // Gọi pgaccess LẦN NỮA mà KHÔNG access gì
++  abits = 0;
++  if (pgaccess(buf, 3, &abits) < 0) {
++    err("pgaccess lan 2 failed");
++  }
++  
++  printf("    -> abits = 0x%lx (mong doi = 0)\n", abits);
++  
++  // Verify: tất cả bits PHẢI = 0 (vì đã clear ở lần gọi trước)
++  if (abits != 0) {
++    printf("    LOI: PTE_A KHONG duoc clear! abits = 0x%lx\n", abits);
++    printf("    -> Kernel thieu dong: *pte &= ~PTE_A\n");
++    err("PTE_A not cleared!");
++  }
++  printf("    -> PASS: Da clear, abits = 0\n");
++  
++  // ========== LAN 3: ACCESS PAGE 2 MOI ==========
++  printf("  Lan 3: Access page 2 moi...\n");
++  
++  // Access page 2
++  buf[2 * PGSIZE] = 'Y';
++  
++  // Gọi pgaccess
++  abits = 0;
++  if (pgaccess(buf, 3, &abits) < 0) {
++    err("pgaccess lan 3 failed");
++  }
++  
++  printf("    -> abits = 0x%lx\n", abits);
++  
++  // Verify: bit 2 phải được set
++  if ((abits & (1 << 2)) == 0) {
++    printf("    LOI: Mong doi bit 2 = 1, nhung abits = 0x%lx\n", abits);
++    err("Lan 3 failed: bit 2 not set");
++  }
++  printf("    -> PASS: Bit 2 da set\n");
++  
++  // ========== CLEANUP ==========
++  sbrk(-3 * PGSIZE);
++  
++  printf("pgaccess_test: Test 3 - OK (Clear PTE_A hoat dong dung!)\n");
++}
++
++/**
++ * MAIN PGACCESS TEST SUITE
++ * ------------------------
++ * Chạy tất cả 3 tests theo thứ tự
++ */
++void
++pgaccess_test()
++{
++  printf("\n");
++  printf("        PGACCESS TEST SUITE - Lab 2: Page Tables\n");
++  printf("============================================================\n");
++  
++  pgaccess_test_none();      // Test 1: Syscall hoat dong
++  printf("\n");
++  
++  pgaccess_test_single();    // Test 2: Detect 1 page
++  printf("\n");
++  
++  pgaccess_test_clearing();  // Test 3: Clear PTE_A (QUAN TRONG NHAT!)
++  printf("\n");
++  
++  printf("============================================================\n");
++  printf("        PGACCESS: TAT CA 3 TESTS PASSED!\n");
++  printf("\n");
++}
+ 
+ void
+ supercheck(char *end)
+ {
++
+   pte_t last_pte = 0;
+   uint64 a = (uint64) end;
+   uint64 s = SUPERPGROUNDUP(a);
+diff --git a/user/user.h b/user/user.h
+index 025dee5..bc154f1 100644
+--- a/user/user.h
++++ b/user/user.h
+@@ -29,6 +29,7 @@ int getpid(void);
+ char* sys_sbrk(int,int);
+ int pause(int);
+ int uptime(void);
++int pgaccess(void *base, int len, void *mask);
+ #ifdef LAB_NET
+ int bind(uint16);
+ int unbind(uint16);
+diff --git a/user/usys.pl b/user/usys.pl
+index 7e0c162..b46baa1 100755
+--- a/user/usys.pl
++++ b/user/usys.pl
+@@ -48,3 +48,4 @@ entry("send");
+ entry("recv");
+ entry("pgpte");
+ entry("kpgtbl");
++entry("pgaccess");
